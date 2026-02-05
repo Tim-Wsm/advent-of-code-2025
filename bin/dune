@@ -1,0 +1,9 @@
+(executable
+ (public_name AdventOfCode2025)
+ (name main)
+ (libraries AdventOfCode2025 cmdliner)
+ (flags
+  (:standard -g))
+ (ocamlopt_flags (-O3)) 
+ (preprocess (pps ppx_let))
+ )
