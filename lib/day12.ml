@@ -137,10 +137,44 @@ open Solution
 open CustomErrors
 
 module Day12 : Solution = struct
-  type tile_t = Shape | Empty
-  type shape_t = { id : int; layout : tile_t list list; dimensions : int }
+  module PositionSet = Set.Make (struct
+    type t = int * int
+
+    let compare = Stdlib.compare
+  end)
+
+  module IntMap = Map.Make (struct
+    type t = int
+
+    let compare = Stdlib.compare
+  end)
+
+  type shape_t = { layout : PositionSet.t; width : int; height : int }
+
+  module ShapeSet = Set.Make (struct
+    type t = shape_t
+
+    let compare = Stdlib.compare
+  end)
+
+  module ShapeMap = Map.Make (struct
+    type t = shape_t
+
+    let compare = Stdlib.compare
+  end)
+
+  (*
+  type shape_placement_t = {
+    x : int;
+    y : int;
+    layout : PositionSet.t;
+    score : int;
+    advanced_score : int ShapeMap.t;
+  }
+  *)
+
   type region_t = { width : int; height : int; shapes : int list }
-  type t = shape_t list * region_t list
+  type t = (int * shape_t) list * region_t list
 
   (*--------------------------------------------------------------------------*)
   (* Parser                                                                   *)
@@ -149,15 +183,22 @@ module Day12 : Solution = struct
   let parses_integer =
     take_while1 (function '0' .. '9' -> true | _ -> false) >>| int_of_string
 
-  let parse_tile =
-    char '#' >>| (fun _ -> Shape) <|> (char '.' >>| fun _ -> Empty)
+  let parse_tile = char '#' >>| (fun _ -> true) <|> (char '.' >>| fun _ -> false)
 
   let parse_shape =
     let* id = parses_integer <* char ':' <* end_of_line in
-    let* layout = many1 (many1 parse_tile <* end_of_line) in
-    let dimensions = List.length layout in
-    assert (List.for_all (fun row -> dimensions = List.length row) layout);
-    return { id; layout; dimensions }
+    let* grid = many1 (many1 parse_tile <* end_of_line) in
+    let layout =
+      grid
+      |> List.mapi (fun y row ->
+          List.mapi
+            (fun x is_shape -> if is_shape then Some (x, y) else None)
+            row)
+      |> List.flatten
+      |> List.filter_map (fun x -> x)
+      |> PositionSet.of_list
+    in
+    return (id, { layout; width = List.length grid; height = List.length grid })
 
   let parse_region =
     let* width = parses_integer in
@@ -182,171 +223,286 @@ module Day12 : Solution = struct
         Error CustomErrors.parsing_error
 
   (*--------------------------------------------------------------------------*)
-  (* Helper functions                                                         *)
+  (* Helper functions (printing)                                              *)
   (*--------------------------------------------------------------------------*)
 
-  let print_layout layout =
-    List.iter
-      (fun row ->
-        List.iter
-          (function Shape -> Printf.printf "#" | Empty -> Printf.printf ".")
-          row;
-        Printf.printf "\n")
-      layout
+  let _print_layout layout =
+    let width =
+      PositionSet.to_list layout
+      |> List.map (fun (x, _) -> x)
+      |> List.sort (fun a b -> compare b a)
+      |> List.hd
+    in
+    let height =
+      PositionSet.to_list layout
+      |> List.map (fun (_, y) -> y)
+      |> List.sort (fun a b -> compare b a)
+      |> List.hd
+    in
 
-  let print_shape shape =
-    Printf.printf "%i:\n" shape.id;
-    print_layout shape.layout;
+    List.iter
+      (fun y ->
+        List.iter
+          (fun x ->
+            if PositionSet.mem (x, y) layout then Printf.printf "#"
+            else Printf.printf ".")
+          (List.init (height + 1) (fun x -> x));
+        Printf.printf "\n")
+      (List.init (width + 1) (fun y -> y))
+
+  let _print_shape (shape : shape_t) =
+    Printf.printf "(dim:%ix%i, size:%i)\n" shape.width shape.height
+      (PositionSet.cardinal shape.layout);
+    List.iter
+      (fun y ->
+        List.iter
+          (fun x ->
+            if PositionSet.mem (x, y) shape.layout then Printf.printf "#"
+            else Printf.printf ".")
+          (List.init shape.width (fun x -> x));
+        Printf.printf "\n")
+      (List.init shape.height (fun y -> y));
     Printf.printf "\n"
 
-  let print_region region =
+  let _print_region region =
     Printf.printf "%ix%i:" region.width region.height;
     List.iter (fun num_shapes -> Printf.printf " %i" num_shapes) region.shapes;
     Printf.printf "\n"
 
-  let empty_layout width height =
-    List.init height (fun _ -> List.init width (fun _ -> Empty))
+  (*--------------------------------------------------------------------------*)
+  (* Helper functions (layouts and shapes)                                    *)
+  (*--------------------------------------------------------------------------*)
 
-  let rotate_shape shape =
-    let layout =
-      List.fold_left
-        (fun acc row -> List.map2 (fun column value -> value :: column) acc row)
-        (List.init (List.length shape.layout) (fun _ -> []))
-        shape.layout
-    in
-    { shape with layout }
-
-  let rotate_shape_by shape num =
+  let rotate_layout_by layout width height num =
     match num with
-    | 0 -> shape
-    | 1 -> rotate_shape shape
-    | 2 -> rotate_shape (rotate_shape shape)
-    | 3 -> rotate_shape (rotate_shape (rotate_shape shape))
+    | 0 -> layout
+    | 1 ->
+        (* rotate by 90° *)
+        layout |> PositionSet.map (fun (x, y) -> (y, width - x - 1))
+    | 2 ->
+        (* rotate by 180° *)
+        layout
+        |> PositionSet.map (fun (x, y) -> (width - x - 1, height - y - 1))
+    | 3 ->
+        (* rotate by 270° *)
+        layout
+        |> PositionSet.map (fun (x, y) ->
+            (height - y - 1, width - (width - x - 1) - 1))
     | _ -> assert false
 
-  (* the x y coordinates corespond to the top left corner of the shape *)
-  let place_shape shape target_x target_y width height =
-    assert (target_x + shape.dimensions <= width);
-    assert (target_y + shape.dimensions <= height);
-    List.init height (fun y ->
-        List.init width (fun x ->
-            if
-              target_x <= x
-              && x < target_x + shape.dimensions
-              && target_y <= y
-              && y < target_y + shape.dimensions
-            then List.nth (List.nth shape.layout (y - target_y)) (x - target_x)
-            else Empty))
+  (*--------------------------------------------------------------------------*)
+  (* Helper functions                                                         *)
+  (*--------------------------------------------------------------------------*)
 
-  let possible_placements shape width height =
+  let possible_placements (shape : shape_t) width height =
     (* all x values between 0 and width - shape dimensions *)
+    let xs = Seq.init (width - shape.width + 1) (fun x -> x) in
     (* all y values between 0 and height - shape dimensions *)
+    let ys = Seq.init (height - shape.height + 1) (fun y -> y) in
     (* all four rotations of the shape *)
-    List.init
-      (width - shape.dimensions + 1)
-      (fun x ->
-        List.init
-          (height - shape.dimensions + 1)
-          (fun y -> List.init 4 (fun num_rotations -> (x, y, num_rotations))))
-    |> List.flatten |> List.flatten
-
-  let layouts_overlap layout_1 layout_2 =
-    List.map2
-      (fun row_1 row_2 ->
-        List.map2 (fun tile_1 tile_2 -> (tile_1, tile_2)) row_1 row_2)
-      layout_1 layout_2
-    |> List.exists (List.exists (function Shape, Shape -> true | _ -> false))
-
-  let merge_layouts layout_1 layout_2 =
-    List.map2
-      (fun row_1 row_2 ->
-        List.map2
-          (fun tile_1 tile_2 ->
-            match (tile_1, tile_2) with
-            | Shape, _ | _, Shape -> Shape
-            | Empty, Empty -> Empty)
-          row_1 row_2)
-      layout_1 layout_2
-
-  let tile_is_usable x y width height layout shapes =
-    (* first obtain all possible placements around this position *)
-    shapes
-    |> List.map (fun (_, shape) ->
-        List.init 4 (fun num_rotation ->
-            List.init 3 (fun x_shift ->
-                List.init 3 (fun y_shift ->
-                    (shape, x + x_shift, y + y_shift, num_rotation)))))
-    |> List.flatten |> List.flatten |> List.flatten
-    |> List.filter (fun (shape, x, y, _) ->
-        x + shape.dimensions <= width && y + shape.dimensions <= height)
-      (* then check if there is one placement that can fill this tile *)
-    |> List.exists (fun (shape, x, y, num_rotations) ->
-        let placed_shape =
-          place_shape (rotate_shape_by shape num_rotations) x y width height
+    let num_rotations = Seq.init 4 (fun n -> n) in
+    (* generate all possible placements of the shape *)
+    Seq.product xs ys |> Seq.product num_rotations
+    |> Seq.filter (fun (_, (target_x, target_y)) ->
+        assert (shape.width = shape.height);
+        target_x + shape.width <= width && target_y + shape.height <= height)
+    |> Seq.map (fun (num_rotations, (target_x, target_y)) ->
+        let layout =
+          rotate_layout_by shape.layout shape.width shape.height num_rotations
+          |> PositionSet.map (fun (x, y) -> (x + target_x, y + target_y))
         in
-        (not (layouts_overlap placed_shape layout))
-        && List.nth (List.nth (merge_layouts placed_shape layout) y) x = Shape)
+        { layout; width; height })
 
-  let num_usable_tiles width height layout shapes =
-    List.init width (fun y -> List.init height (fun x -> (x, y)))
-    |> List.flatten
-    |> List.filter (fun (x, y) -> tile_is_usable x y width height layout shapes)
-    |> List.length
+  let possible_overlapping_layouts shape =
+    Seq.product
+      (Seq.init 3 (fun x_shift -> -x_shift))
+      (Seq.init 3 (fun y_shift -> -y_shift))
+    |> Seq.product (Seq.init 4 (fun n -> n))
+    |> Seq.map (fun (num_rotations, (target_x, target_y)) ->
+        rotate_layout_by shape.layout shape.width shape.height num_rotations
+        |> PositionSet.map (fun (shape_x, shape_y) ->
+            (shape_x + target_x, shape_y + target_y)))
+    |> Seq.filter (fun rotated_layout ->
+        PositionSet.exists
+          (fun (shape_x, shape_y) -> 0 = shape_x && 0 = shape_y)
+          rotated_layout)
 
-  let rec all_shapes_fit shapes width height layout =
+  let tile_is_usable layout x y width height shape shapes_possible_layouts =
+    ShapeMap.find shape shapes_possible_layouts
+    |> Seq.map (fun possible_layout ->
+        possible_layout
+        |> PositionSet.map (fun (shape_x_shift, shape_y_shift) ->
+            (x + shape_x_shift, y + shape_y_shift)))
+    |> Seq.filter (fun possible_layout ->
+        PositionSet.for_all
+          (fun (shape_x, shape_y) ->
+            0 <= shape_x && shape_x < width && 0 <= shape_y && shape_y < height)
+          possible_layout)
+    |> Seq.exists (fun possible_layout ->
+        PositionSet.for_all
+          (fun (shape_x, shape_y) ->
+            not (PositionSet.mem (shape_x, shape_y) layout))
+          possible_layout)
+
+  let count_if width height f =
+    let rec iter x y acc =
+      if height <= y then acc
+      else if width <= x then iter 0 (y + 1) acc
+      else if f x y then iter (x + 1) y (acc + 1)
+      else iter (x + 1) y acc
+    in
+    iter 0 0 0
+
+  let num_usable_tiles layout width height shape shapes_possible_layouts =
+    count_if width height (fun x y ->
+        (not (PositionSet.mem (x, y) layout))
+        && tile_is_usable layout x y width height shape shapes_possible_layouts)
+
+  let num_usable_tiles_combined layout width height shapes
+      shapes_possible_layouts =
+    count_if width height (fun x y ->
+        (not (PositionSet.mem (x, y) layout))
+        && ShapeSet.exists
+             (fun shape ->
+               tile_is_usable layout x y width height shape
+                 shapes_possible_layouts)
+             shapes)
+
+  let calculate_score layout width height remaining_shapes
+      shapes_possible_layouts =
+    ShapeSet.to_list remaining_shapes
+    |> List.map (fun shape ->
+        ( shape,
+          num_usable_tiles layout width height shape shapes_possible_layouts ))
+    |> ShapeMap.of_list
+
+  let score_strictly_worse score_1 score_2 =
+    ShapeMap.exists
+      (fun shape_1 num_usable_tiles ->
+        num_usable_tiles < ShapeMap.find shape_1 score_2)
+      score_1
+    && ShapeMap.for_all
+         (fun shape_1 num_usable_tiles ->
+           num_usable_tiles <= ShapeMap.find shape_1 score_2)
+         score_1
+
+  (* This version works even if the shapes could be more tightly packed (such as the simpel input) *)
+  let rec _all_shapes_fit_propper (shapes : shape_t list) width height layout
+      shapes_possible_layouts =
     match shapes with
     | [] -> true
-    | (0, _) :: rest -> all_shapes_fit rest width height layout
-    | (n, shape) :: rest ->
-        let placements_sorted_by_usable_tiles =
-          possible_placements shape width height
-          |> List.filter_map (fun (x, y, num_rotations) ->
-              let placed_shape =
-                place_shape
-                  (rotate_shape_by shape num_rotations)
-                  x y width height
-              in
-              if layouts_overlap layout placed_shape then None
-              else
-                let merged_layout = merge_layouts layout placed_shape in
-                if n = 0 then
-                  Some
-                    ( (x, y, num_rotations),
-                      num_usable_tiles width height merged_layout rest )
-                else
-                  Some
-                    ( (x, y, num_rotations),
-                      num_usable_tiles width height merged_layout shapes ))
-          |> List.sort (fun (_, x) (_, y) -> compare y x)
+    | shape :: rest ->
+        let num_remaining_tiles =
+          rest
+          |> List.map (fun shape -> PositionSet.cardinal shape.layout)
+          |> List.fold_left ( + ) 0
         in
 
-        if List.is_empty placements_sorted_by_usable_tiles then false
-        else
-          let _, optimal_usable_tiles =
-            List.hd placements_sorted_by_usable_tiles
-          in
+        let remaining_shapes = ShapeSet.of_list rest in
 
-          placements_sorted_by_usable_tiles
-          |> List.filter (fun (_, usable_tiles) ->
-              usable_tiles = optimal_usable_tiles)
-          |> List.map (fun (placement, _) -> placement)
-          |> List.exists (fun (x, y, num_rotations) ->
-              let placed_shape =
-                place_shape
-                  (rotate_shape_by shape num_rotations)
-                  x y width height
-              in
-              let merged_layout = merge_layouts placed_shape layout in
-              all_shapes_fit ((n - 1, shape) :: rest) width height merged_layout)
+        let placement_is_eq_or_mirror placement_1 placement_2 =
+          PositionSet.equal placement_1.layout placement_2.layout
+          || PositionSet.equal placement_1.layout
+               (rotate_layout_by placement_2.layout placement_2.width
+                  placement_2.height 2)
+        in
+
+        (* generate all possible placements of the shape *)
+        possible_placements shape width height
+        |>
+        (* remove all placements that overlap in the current layout *)
+        Seq.filter (fun placement ->
+            PositionSet.for_all
+              (fun (x, y) -> not (PositionSet.mem (x, y) layout))
+              placement.layout)
+        |>
+        (* apply every possible placement *)
+        Seq.map (fun placement ->
+            {
+              placement with
+              layout = PositionSet.union placement.layout layout;
+            })
+        |> Seq.memoize
+        |>
+        (* remove all placements that result in a mirrored solution *)
+        fun placements ->
+        Seq.filter
+          (fun p1 ->
+            Some p1
+            = Seq.find (fun p2 -> placement_is_eq_or_mirror p1 p2) placements)
+          placements
+        |> Seq.memoize
+        |>
+        (* remove all placements that result in a layout that does not fit
+           all remaining shapes *)
+        Seq.filter (fun placed_shape ->
+            num_remaining_tiles
+            <= num_usable_tiles_combined placed_shape.layout placed_shape.width
+                 placed_shape.height remaining_shapes shapes_possible_layouts)
+        |> Seq.memoize
+        (* calculate the score for every possible placement *)
+        |> Seq.map (fun placed_shape ->
+            ( placed_shape,
+              calculate_score placed_shape.layout placed_shape.width
+                placed_shape.height remaining_shapes shapes_possible_layouts ))
+        |> Seq.memoize
+        |>
+        (* remove all placements for which have a strictly worse score *)
+        fun placed_shapes ->
+        Seq.filter
+          (fun (_, s1) ->
+            Seq.for_all
+              (fun (_, s2) -> not (score_strictly_worse s1 s2))
+              placed_shapes)
+          placed_shapes
+        |>
+        (* remove all placements that will not fit the remaining shapes *)
+        Seq.filter (fun (_, score) ->
+            ShapeSet.for_all
+              (fun remaining_shape ->
+                let num_shapes =
+                  rest
+                  |> List.filter (fun s -> s = remaining_shape)
+                  |> List.length
+                in
+                PositionSet.cardinal remaining_shape.layout * num_shapes
+                <= ShapeMap.find remaining_shape score)
+              remaining_shapes)
+        |> Seq.map (fun (p, _) -> p)
+        |> Seq.exists (fun placed_shape ->
+            _all_shapes_fit_propper rest width height placed_shape.layout
+              shapes_possible_layouts)
 
   (*--------------------------------------------------------------------------*)
   (* Solution for the first task                                              *)
   (*--------------------------------------------------------------------------*)
 
+  (* This solution works for the given "complex" input. 
+    
+     Although this only works because the "complex" input does not consider
+     thight packing such as the small example from the description.
+   *)
+  let all_shapes_fit (shapes : shape_t list) width height layout
+      shapes_possible_layouts =
+    let num_remaining_tiles =
+      shapes
+      |> List.map (fun shape -> PositionSet.cardinal shape.layout)
+      |> List.fold_left ( + ) 0
+    in
+
+    num_remaining_tiles
+    <= num_usable_tiles_combined layout width height (ShapeSet.of_list shapes)
+         shapes_possible_layouts
+
   let compute_simple (shapes, regions) =
-    List.iter (fun shape -> print_shape shape) shapes;
-    List.iter (fun region -> print_region region) regions;
-    Printf.printf "\n";
+    let shapes_possible_layouts =
+      shapes
+      |> List.map (fun (_, shape) -> shape)
+      |> ShapeSet.of_list |> ShapeSet.to_list
+      |> List.map (fun shape ->
+          (shape, Seq.memoize (possible_overlapping_layouts shape)))
+      |> ShapeMap.of_list
+    in
 
     let result =
       regions
@@ -354,13 +510,15 @@ module Day12 : Solution = struct
           let shapes =
             region.shapes
             |> List.mapi (fun shape_id shape_num ->
-                (shape_num, List.nth shapes shape_id))
+                List.init shape_num (fun _ -> List.nth shapes shape_id))
+            |> List.flatten
+            |> List.map (fun (_, shape) -> shape)
           in
-          all_shapes_fit shapes region.width region.height
-            (empty_layout region.width region.height))
+
+          all_shapes_fit shapes region.width region.height PositionSet.empty
+            shapes_possible_layouts)
       |> List.length
     in
-
     Printf.printf "Task 1: %i\n" result;
     Ok ()
 
