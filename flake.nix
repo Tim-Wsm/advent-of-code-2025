@@ -5,12 +5,19 @@
     opam-nix.url = "github:tweag/opam-nix";
     opam-nix.inputs.nixpkgs.follows = "nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
+    nix-filter.url = "github:numtide/nix-filter";
 
     # use my custom nixvim config to manage the neovim install and configuration
     nixvim-flake = {
       url = "github:Tim-Wsm/nixvim-conf";
       # require nixvim to use the same nixpkgs channel as the system
       inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    # build owl directly because the files distributed via opam do not build
+    ocaml-owl = {
+      url = "github:owlbarn/owl";
+      flake = false;
     };
 
     # make opam packages updatable via the official github repo
@@ -21,6 +28,7 @@
   };
   outputs = {
     flake-utils,
+    nix-filter,
     opam-nix,
     nixvim-flake,
     nixpkgs,
@@ -37,6 +45,21 @@
         opamParams = {
           # repositories to source the dependencies
           repos = [
+            # use owl from github because the files distributed via opam do not build
+            (
+              opam-nix.lib.${system}.makeOpamRepo
+              (nix-filter.lib.filter {
+                root = inputs.ocaml-owl;
+                include = [
+                  ".ocamlformat"
+                  "dune-project"
+                  "Makefile"
+                  (nix-filter.lib.matchExt "opam")
+                  (nix-filter.lib.inDirectory "src")
+                ];
+              })
+            )
+            # all other dependencies
             inputs.opam-repository
           ];
         };
