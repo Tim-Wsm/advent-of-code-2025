@@ -40,7 +40,6 @@ So, a button wiring schematic like (0,3,4) means that each time you push that
 button, the first, fourth, and fifth indicator lights would all toggle between
 on and off. If the indicator lights were [#.....], pushing the button would
 change them to be [...##.] instead.
-
 Because none of the machines are running, the joltage requirements are
 irrelevant and can be safely ignored.
 
@@ -146,6 +145,7 @@ counters on all of the machines?
 open Angstrom
 open Solution
 open CustomErrors
+open Owl
 
 module Day10 : Solution = struct
   type machine_t = {
@@ -296,126 +296,162 @@ module Day10 : Solution = struct
   (* Solution for the second task                                             *)
   (*--------------------------------------------------------------------------*)
 
-  let apply_button_joltage button joltages =
-    List.mapi
-      (fun joltage_pos joltage ->
-        if List.exists (fun button_pos -> joltage_pos = button_pos) button then
-          joltage + 1
-        else joltage)
-      joltages
+  let button_to_array machine button =
+    Array.init (List.length machine.joltages) (fun button_id ->
+        if
+          List.exists
+            (fun other_button_id -> button_id = other_button_id)
+            button
+        then 1.0
+        else 0.0)
 
-  let valid_joltage machine joltages =
-    List.map2
-      (fun joltage_solution joltage -> joltage <= joltage_solution)
-      machine.joltages joltages
-    |> List.fold_left (fun x y -> x && y) true
+  (* All positivie roots of this function are solutions for the number of
+       button presses required for the machine. However this function
+       additional fixpoints (notably at non-integer number of presses) that are
+       not roots of this function. *)
+  let f buttons joltages max_steps state =
+    let open Algodiff.D in
+    let steps = Maths.sum' state |> unpack_flt in
 
-  let distance_joltage machine joltages =
-    List.map2
-      (fun joltage_solution joltage -> joltage_solution - joltage)
-      machine.joltages joltages
-    |> List.fold_left (fun x y -> x + y) 0
+    let steps_pen = if steps <= max_steps then 0.0 else max_steps -. steps in
 
-  (* I chose the scaling of "joltage distance" to steps to steps by trail and
-     error until the small example worked and was reasonably fast. *)
-  let distance_states_joltage machine (joltages_1, steps_1, _)
-      (joltages_2, steps_2, _) =
-    compare
-      (distance_joltage machine joltages_1 + steps_1)
-      (distance_joltage machine joltages_2 + steps_2)
+    Maths.(
+      (Arr buttons *@ transpose state) - Arr joltages
+      |> concat ~axis:0 ((Arr buttons *@ transpose (floor state)) - Arr joltages)
+      |> transpose
+      |> concat ~axis:1 (state - abs state)
+      |> concat ~axis:1 (F 0.1 * (state - floor state))
+      |> fun a ->
+      concat ~axis:1 a (Arr (Owl.Arr.of_array [| steps_pen |] [| 1; 1 |])))
 
-  (*
-  let rec find_quickest_run_joltages_df machine current_states visited_states =
-    (* sort the set of current states by their distance to the solution *)
-    let sorted_states =
-      List.sort (distance_states_joltage machine) current_states
-    in
-    (* apply each possible button to the state closest to the solution *)
-    let next_states =
-      List.map
-        (fun button -> apply_button_joltage button (List.hd sorted_states))
-        machine.buttons
-      |> List.filter (fun (joltages, _) ->
-          (not (JoltageStateSet.mem joltages visited_states))
-          && valid_joltage machine joltages)
-    in
-    (* if one of the resulting states is the solution we are otherwise continue
-       with this new set of states. *)
-    match
-      List.find_opt
-        (fun (joltages, _) -> joltages = machine.joltages)
-        next_states
-    with
-    | Some (_, num_steps) -> num_steps
-    | None ->
-        let new_visited_states =
-          next_states
-          |> List.map (fun (joltages, _) -> joltages)
-          |> JoltageStateSet.of_list
-          |> JoltageStateSet.union visited_states
-        in
-        find_quickest_run_joltages_df machine
-          (List.append next_states (List.tl sorted_states))
-          new_visited_states
-          *)
+  (* We use the pseudo inverse, because the inverse function crashes 
+     for no apparent reason. *)
+  let pinv arr =
+    Algodiff.D.unpack_arr arr |> Owl.Linalg.D.pinv |> Algodiff.D.pack_arr
 
-  let rec find_quickest_run_joltages_df machine current_states visited_states =
-    (* sort the set of current states by their distance to the solution *)
-    let sorted_states =
-      List.sort (distance_states_joltage machine) current_states
-    in
-    (* apply each possible button to the state closest to the solution *)
-    let hd_state, hd_steps, hd_buttons = List.hd sorted_states in
-    (*
-    Printf.printf "steps: %i buttons:%i distance: %i\n" hd_steps
-      (List.length hd_buttons)
-      (distance_joltage machine hd_state);
+  (* https://pages.hmc.edu/ruye/MachineLearning/lectures/ch2/node7.html *)
+  let rec newton_raphson_opt f x =
+    let open Algodiff.D in
+    (* Check if f x (with x rounded) is approximately equal to zero 
+         -> if yes, we have found a root of f 
+         -> if no, continue with the algorithm 
       *)
-    let next_joltages, next_buttons =
-      List.map
-        (fun button -> (apply_button_joltage button hd_state, button))
-        hd_buttons
-      |> List.filter (fun (joltages, _) -> valid_joltage machine joltages)
-      |> List.split
+    if Owl.Arr.is_zero (unpack_arr (f (Maths.round x))) then
+      Some (Maths.round x)
+    else
+      let fx, j = jacobian' f x in
+      let j_t = Maths.transpose j in
+      let next_x = Maths.(x - (fx *@ (pinv (j_t *@ j) *@ j_t))) in
+      (* Check if the value is approximately equal to the previous value. 
+           -> if yes, we have found a fixpoint that is not a root
+           -> if no, continue 
+        *)
+      if Owl.Arr.approx_equal (unpack_arr x) (unpack_arr next_x) then None
+      else newton_raphson_opt f next_x
+
+  let rec random_sample machine solution_upper_bound max_steps =
+    let random_button =
+      Array.init (List.length machine.buttons) (fun i ->
+          Owl_stats.uniform_rvs ~a:0.0 ~b:(List.nth solution_upper_bound i))
     in
-    let next_states =
-      next_joltages
-      |> List.filter (fun joltages ->
-          not (JoltageStateSet.mem joltages visited_states))
-      |> List.map (fun joltages -> (joltages, hd_steps + 1, next_buttons))
-      |> List.filter (fun (_, _, buttons) -> not (List.is_empty buttons))
+
+    if not (Array.fold_left ( +. ) 0.0 random_button < max_steps) then
+      random_sample machine solution_upper_bound max_steps
+    else
+      Algodiff.D.Arr
+        (Owl.Arr.of_array random_button [| 1; List.length machine.buttons |])
+
+  let find_minimum machine =
+    let buttons =
+      machine.buttons
+      |> List.map (fun button -> button_to_array machine button)
+      |> Array.of_list |> Mat.of_arrays |> Mat.transpose
     in
-    (* if one of the resulting states is the solution we are otherwise continue
-       with this new set of states. *)
-    match
-      List.find_opt
-        (fun (joltages, _, _) -> joltages = machine.joltages)
-        next_states
-    with
-    | Some (_, num_steps, _) -> num_steps
-    | None ->
-        let new_visited_states =
-          next_states
-          |> List.map (fun (joltages, _, _) -> joltages)
-          |> JoltageStateSet.of_list
-          |> JoltageStateSet.union visited_states
-        in
-        find_quickest_run_joltages_df machine
-          (List.append next_states (List.tl sorted_states))
-          new_visited_states
+
+    let joltages =
+      [| Array.of_list (machine.joltages |> List.map Float.of_int) |]
+      |> Mat.of_arrays |> Mat.transpose
+    in
+
+    let solution_upper_bound =
+      machine.buttons
+      |> List.map (fun button ->
+          List.map (fun button_id -> List.nth machine.joltages button_id) button
+          |> List.sort compare |> List.hd)
+      |> List.map (fun max_presses -> Float.of_int max_presses)
+    in
+
+    (* The function has many possible roots and some fixpoints that are not a
+       root. To find the root with the smallest number of button presses, run
+       the newton_raphson algorithm X number of times and pick the best result.
+       -> For a sufficiently high number of tries this should always find the
+          best solution for each machine.
+    *)
+    let atomic_counter = Atomic.make 0 in
+    let current_max = Atomic.make 9999.0 in
+    let mutex = Mutex.create () in
+
+    let thread_f () =
+      let rec iter acc =
+        if Mutex.protect mutex (fun () -> 50 < Atomic.get atomic_counter) then
+          acc
+        else
+          let current_max_l = Atomic.get current_max in
+          let sample =
+            random_sample machine solution_upper_bound current_max_l
+          in
+          match
+            newton_raphson_opt (f buttons joltages current_max_l) sample
+          with
+          | None -> iter acc
+          | Some result_arr ->
+              Mutex.lock mutex;
+              let result =
+                result_arr |> Algodiff.D.Maths.sum' |> Algodiff.D.unpack_flt
+              in
+              if result = Atomic.get current_max then Atomic.incr atomic_counter
+              else if result < Atomic.get current_max then (
+                Atomic.set current_max result;
+                Atomic.set atomic_counter 0);
+              Printf.printf "\rcurrent max:%f <- got %i roots"
+                (Atomic.get current_max)
+                (Atomic.get atomic_counter);
+              flush_all ();
+              Mutex.unlock mutex;
+              iter (result_arr :: acc)
+      in
+      iter []
+    in
+
+    let minimums =
+      List.init 16 (fun _ -> Domain.spawn thread_f)
+      |> List.concat_map (fun d -> Domain.join d)
+      |> List.map (fun m -> Algodiff.D.unpack_arr m)
+      |> List.sort (fun m1 m2 -> compare (Arr.sum' m1) (Arr.sum' m2))
+    in
+
+    Printf.printf "\nResults: \n";
+    Printf.printf "got %i roots\n" (List.length minimums);
+    List.iter
+      (fun minimum -> Printf.printf "%i " (minimum |> Arr.sum' |> Float.to_int))
+      minimums;
+    Printf.printf "\nres:%f\n" (List.hd minimums |> Arr.sum');
+
+    flush_all ();
+
+    List.hd minimums |> Arr.sum'
 
   let compute_advanced machines =
     let result =
-      machines |> List.take 2
-      |> List.map (fun machine ->
-          let init_joltages =
-            List.init (List.length machine.joltages) (fun _ -> 0)
-          in
-          find_quickest_run_joltages_df machine
-            [ (init_joltages, 0, machine.buttons) ]
-            (JoltageStateSet.singleton init_joltages))
-      |> List.fold_left (fun x y -> x + y) 0
+      machines
+      |> List.mapi (fun i machine ->
+          Printf.printf "----------------------------------\n";
+          Printf.printf "machine %i (out of %i)\n" (i + 1)
+            (List.length machines);
+          find_minimum machine)
+      |> List.fold_left ( +. ) 0.0
     in
-    Printf.printf "Task 2: %i\n" result;
+
+    Printf.printf "Task 2: %f\n" result;
     Ok ()
 end

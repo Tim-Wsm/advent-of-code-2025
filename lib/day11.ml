@@ -146,24 +146,46 @@ module Day11 : Solution = struct
   (* Solution for the first task                                              *)
   (*--------------------------------------------------------------------------*)
 
-  let rec count_paths network state visited_states =
-    if state = "out" then 1
-    else if StringSet.mem state visited_states then 0
-    else
-      StringSet.fold
-        (fun dest acc ->
-          acc + count_paths network dest (StringSet.add state visited_states))
-        (StringMap.find state network)
-        0
+  (* A simple breadth first path counting algorithm. *)
+  let count_paths network start target ignored_nodes =
+    let rec iter states num_paths =
+      let final_states, remaining_states =
+        states |> List.partition (fun (state, _) -> state = target)
+      in
+
+      let next_states =
+        remaining_states
+        |> List.filter (fun (state, visited_states) ->
+            state <> target
+            && (not (StringSet.mem state visited_states))
+            && StringMap.mem state network)
+        |> List.concat_map (fun (state, visited_states) ->
+            let next_visited_states = StringSet.add state visited_states in
+            StringMap.find state network
+            |> StringSet.to_list
+            |> List.filter_map (fun dest ->
+                if not (StringSet.mem dest next_visited_states) then
+                  Some (dest, next_visited_states)
+                else None))
+      in
+
+      if List.is_empty next_states then num_paths + List.length final_states
+      else iter next_states (num_paths + List.length final_states)
+    in
+
+    iter [ (start, ignored_nodes) ] 0
 
   let compute_simple network =
-    Printf.printf "Task 1: %i\n" (count_paths network "you" StringSet.empty);
+    Printf.printf "Task 1: %i\n"
+      (count_paths network "you" "out" StringSet.empty);
+    flush_all ();
     Ok ()
 
   (*--------------------------------------------------------------------------*)
   (* Solution for the second task                                             *)
   (*--------------------------------------------------------------------------*)
 
+  (* A simple breadth first reachability algorithm. *)
   let rec reachable network states target visited_states =
     match states with
     | [] -> false
@@ -181,54 +203,84 @@ module Day11 : Solution = struct
         reachable network next_states target
           (StringSet.add state visited_states)
 
-  let rec count_paths_advanced num_paths network state visited_states
-      fft_reachable dac_reachable =
-    if
-      state = "out"
-      && StringSet.mem "dac" visited_states
-      && StringSet.mem "fft" visited_states
-    then num_paths + 1
-    else if state = "out" || StringSet.mem state visited_states then 0
-    else
-      match StringMap.find_opt state network with
-      | None -> 0
-      | Some destinations ->
-          let new_visited_states = StringSet.add state visited_states in
-          StringSet.to_list destinations
-          |> List.filter (fun dest -> not (StringSet.mem dest visited_states))
-          |> List.filter (fun dest ->
-              StringSet.mem "dac" new_visited_states
-              || StringSet.mem dest dac_reachable)
-          |> List.filter (fun dest ->
-              StringSet.mem "fft" new_visited_states
-              || StringSet.mem dest fft_reachable)
-          |> List.fold_left
-               (fun num_paths dest ->
-                 count_paths_advanced num_paths network dest new_visited_states
-                   fft_reachable dac_reachable)
-               num_paths
+  let network_filter network target ignore_set =
+    let reachable_nodes =
+      StringMap.to_list network
+      |> List.filter (fun (source, _) ->
+          reachable network [ source ] target ignore_set)
+      |> List.fold_left
+           (fun acc (source, _) -> StringSet.add source acc)
+           StringSet.empty
+    in
+    StringMap.filter
+      (fun state _ -> StringSet.mem state reachable_nodes)
+      network
+    |> StringMap.map (fun destinations ->
+        StringSet.inter destinations reachable_nodes)
+
+  let network_intersect =
+    StringMap.merge (fun _ left_opt right_opt ->
+        match (left_opt, right_opt) with
+        | None, None -> None
+        | Some destinations, None | None, Some destinations -> Some destinations
+        | Some destinations_left, Some destinations_right ->
+            destinations_left
+            |> StringSet.filter (fun dest_left ->
+                StringSet.exists
+                  (fun dest_right -> dest_left = dest_right)
+                  destinations_right)
+            |> fun d -> if StringSet.is_empty d then None else Some d)
 
   let compute_advanced network =
-    let fft_reachable =
-      StringMap.to_list network
-      |> List.filter (fun (source, _) ->
-          reachable network [ source ] "fft" StringSet.empty)
-      |> List.fold_left
-           (fun acc (source, _) -> StringSet.add source acc)
-           StringSet.empty
+    let paths_srv_to_fft =
+      count_paths
+        (network_intersect
+           (network_filter network "fft" (StringSet.of_list [ "dac"; "out" ]))
+           (network_filter network "dac" (StringSet.of_list [ "out" ])))
+        "svr" "fft"
+        (StringSet.of_list [ "dac"; "out" ])
     in
-    Printf.printf "%i\n" (StringSet.cardinal fft_reachable);
-    let dac_reachable =
-      StringMap.to_list network
-      |> List.filter (fun (source, _) ->
-          reachable network [ source ] "dac" StringSet.empty)
-      |> List.fold_left
-           (fun acc (source, _) -> StringSet.add source acc)
-           StringSet.empty
+
+    let paths_srv_to_dac =
+      count_paths
+        (network_intersect
+           (network_filter network "dac" (StringSet.of_list [ "fft"; "out" ]))
+           (network_filter network "fft" (StringSet.of_list [ "out" ])))
+        "svr" "dac"
+        (StringSet.of_list [ "fft"; "out" ])
     in
-    Printf.printf "%i\n" (StringSet.cardinal dac_reachable);
+
+    let paths_fft_to_dac =
+      if paths_srv_to_fft = 0 then 0
+      else
+        count_paths
+          (network_filter network "dac" (StringSet.of_list [ "fft"; "out" ]))
+          "fft" "dac"
+          (StringSet.of_list [ "svr"; "out" ])
+    in
+
+    let paths_dac_to_fft =
+      if paths_srv_to_dac = 0 then 0
+      else
+        count_paths
+          (network_filter network "fft" (StringSet.of_list [ "dac"; "out" ]))
+          "dac" "fft"
+          (StringSet.of_list [ "svr"; "out" ])
+    in
+
+    let paths_dac_to_out =
+      if paths_fft_to_dac = 0 then 0
+      else count_paths network "dac" "out" (StringSet.of_list [ "svr"; "fft" ])
+    in
+
+    let paths_fft_to_out =
+      if paths_dac_to_fft = 0 then 0
+      else count_paths network "fft" "out" (StringSet.of_list [ "svr"; "dac" ])
+    in
+
     Printf.printf "Task 2: %i\n"
-      (count_paths_advanced 0 network "svr" StringSet.empty fft_reachable
-         dac_reachable);
+      ((paths_srv_to_fft * paths_fft_to_dac * paths_dac_to_out)
+      + (paths_srv_to_dac * paths_dac_to_fft * paths_fft_to_out));
+
     Ok ()
 end
