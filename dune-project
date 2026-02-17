@@ -30,6 +30,7 @@
    cmdliner
    angstrom
    zarith
+   owl
   )
  (tags
   ("add topics" "to describe" your project)))

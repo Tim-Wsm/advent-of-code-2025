@@ -1,6 +1,6 @@
 (library
  (name AdventOfCode2025)
- (libraries cmdliner angstrom zarith owl domainslib)
+ (libraries cmdliner angstrom owl zarith)
  (modules 
    ; shared modules
    customErrors solution
